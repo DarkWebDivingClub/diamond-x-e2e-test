@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-only"
 description = "Shared infrastructure for driving dln-node end-to-end scenarios."
+publish = ["h3"]   # consumed by three suites; internal registry when it exists
 
 [dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "signal", "time", "io-util"] }
