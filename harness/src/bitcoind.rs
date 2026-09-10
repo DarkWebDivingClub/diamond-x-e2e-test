@@ -41,7 +41,7 @@ pub struct AttachConfig {
     pub wallet: String,
     /// `signet`, `regtest`, ... — passed through to dln-node.
     pub network: String,
-    /// What to call this chain in errors, e.g. `btk.signet`. Both signets
+    /// What to call this chain in errors, e.g. `xbt.signet`. Both signets
     /// share a network name, so this is what makes a timeout actionable.
     pub label: String,
 }

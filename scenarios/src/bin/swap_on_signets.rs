@@ -1,9 +1,11 @@
 //! An atomic cross-chain swap on chains the test cannot mine on.
 //!
-//! Mission 10.3. `swap_on_btk` proves this swap, but against chains the
+//! Mission 10.3. `swap_on_xbt` proves this swap, but against chains the
 //! harness starts, premines and mines on demand. Here both legs run on the
-//! live signets — `btc.signet.dwdc.club` and `btk.signet.dwdc.club` — which
-//! belong to nobody running this test.
+//! live signets — `btc.signet.dwdc` and `xbt.signet.dwdc` — which the
+//! harness cannot mine on. It ran against the public chains until
+//! 2026-09-08; it now runs against the internal ones, which differ only
+//! in being ours to reset.
 //!
 //! What that changes:
 //!
@@ -16,12 +18,12 @@
 //! - **Real funding.** Alice and Bob draw from the treasuries funded in
 //!   10.1 and 10.2 rather than from a coinbase the test just made.
 //!
-//! The BTK chain has BLAKE2b active from height 1, so unlike `swap_on_btk`
+//! The XBT chain has BLAKE2b active from height 1, so unlike `swap_on_xbt`
 //! there is no activation to arrange — every block is already v2. The
 //! header assertion stays, because a swap that passed with both legs on
-//! v1 chains would prove nothing about BTK.
+//! v1 chains would prove nothing about XBT.
 //!
-//! Happy path only, as in `swap_on_btk`. Mission 04 is where abandonment
+//! Happy path only, as in `swap_on_xbt`. Mission 04 is where abandonment
 //! and CLTV ordering get tested.
 //!
 //! Run it deliberately, not in the suite:
@@ -65,7 +67,7 @@ fn attach_cfg(port: u16, network: &str, label: &str) -> AttachConfig {
         rpc_password: std::env::var(if port == 48333 {
             "BTC_TREASURY_RPCPASS"
         } else {
-            "BTK_TREASURY_RPCPASS"
+            "XBT_TREASURY_RPCPASS"
         })
         .expect("treasury RPC password must be in the environment"),
         wallet: "treasury".into(),
@@ -118,10 +120,10 @@ async fn run_scenario() -> Result<()> {
     // ── Step 1: attach to two chains we do not own ──────────────────────
     info!("Step 1: attaching to the live signets");
     let core = BitcoindHarness::attach(attach_cfg(48333, "signet", "btc.signet")).await;
-    let knots = BitcoindHarness::attach(attach_cfg(48332, "signet", "btk.signet")).await;
+    let knots = BitcoindHarness::attach(attach_cfg(48332, "signet", "xbt.signet")).await;
 
     // The whole point of this scenario. If either of these could mine, it
-    // would be swap_on_btk with different hostnames.
+    // would be swap_on_xbt with different hostnames.
     anyhow::ensure!(
         !core.can_mine() && !knots.can_mine(),
         "this scenario must hold no mining authority on either chain"
@@ -129,7 +131,7 @@ async fn run_scenario() -> Result<()> {
 
     let core_height = height(&core).await?;
     let knots_height = height(&knots).await?;
-    info!("  BTC signet at {core_height}, BTK signet at {knots_height} — neither is ours to mine");
+    info!("  BTC signet at {core_height}, XBT signet at {knots_height} — neither is ours to mine");
 
     // Nothing below may assume a starting height; these are only reported.
     anyhow::ensure!(
@@ -138,21 +140,21 @@ async fn run_scenario() -> Result<()> {
     );
 
     // ── Step 2: the chains really are different ─────────────────────────
-    // BTK activated BLAKE2b at height 1, so its tip is v2 and always was.
+    // XBT activated BLAKE2b at height 1, so its tip is v2 and always was.
     info!("Step 2: verifying the two chains use different header formats");
     assert_header(&core, core_height, 1)
         .await
         .context("the BTC chain should be v1")?;
     assert_header(&knots, knots_height, 2)
         .await
-        .context("the BTK chain should be v2")?;
+        .context("the XBT chain should be v2")?;
     assert_header(&knots, 1, 2)
         .await
-        .context("BTK activates at height 1, so block 1 should already be v2")?;
-    info!("  BTC v1 at {core_height}; BTK v2 at 1 and at {knots_height}");
+        .context("XBT activates at height 1, so block 1 should already be v2")?;
+    info!("  BTC v1 at {core_height}; XBT v2 at 1 and at {knots_height}");
 
     // ── Step 3: four nodes, funded from the treasuries ──────────────────
-    info!("Step 3: four nodes — BTK side reads v2 headers, BTC side is stock");
+    info!("Step 3: four nodes — XBT side reads v2 headers, BTC side is stock");
     let (_relay_container, relay_url) = relay::start_relay().await;
 
     // On a chain we cannot mine, this address is never used; the treasury
@@ -200,19 +202,19 @@ async fn run_scenario() -> Result<()> {
     .context("channels never confirmed — are both miners producing?")?;
     info!("  both channels ready after {:.0}s of waiting", opened.elapsed().as_secs_f32());
 
-    // ── Step 5: the BTK channel really is on the BLAKE2b chain ──────────
+    // ── Step 5: the XBT channel really is on the BLAKE2b chain ──────────
     let funding_txid = alice_knots
         .list_channels()
         .await?
         .into_iter()
         .find(|c| c["peer_pubkey"].as_str() == Some(bob_knots_id.as_str()))
-        .context("no BTK channel")?["funding_txid"]
+        .context("no XBT channel")?["funding_txid"]
         .as_str()
-        .context("BTK channel has no funding_txid")?
+        .context("XBT channel has no funding_txid")?
         .to_string();
     let funding_height = tx_block_height(&knots, &funding_txid).await?;
     assert_header(&knots, funding_height, 2).await?;
-    info!("Step 5: BTK funding {funding_txid} confirmed in block {funding_height}, a v2 block");
+    info!("Step 5: XBT funding {funding_txid} confirmed in block {funding_height}, a v2 block");
 
     // ── Step 6: one hash, two invoices ──────────────────────────────────
     info!("Step 6: bob generates the secret; both legs use its hash");
@@ -228,7 +230,7 @@ async fn run_scenario() -> Result<()> {
         .await
         .context("alice-core make_hold_invoice failed")?;
     let bob_invoice = bob_knots
-        .make_hold_invoice(KNOTS_LEG_MSAT, &payment_hash, "swap: bob receives btk")
+        .make_hold_invoice(KNOTS_LEG_MSAT, &payment_hash, "swap: bob receives xbt")
         .await
         .context("bob-knots make_hold_invoice failed")?;
 
@@ -273,7 +275,7 @@ async fn run_scenario() -> Result<()> {
         })
         .await?;
         tokio::time::sleep(Duration::from_secs(3)).await;
-        info!("Step 8: bob settles the BTK leg, revealing the secret");
+        info!("Step 8: bob settles the XBT leg, revealing the secret");
         bob_knots.settle_hold_invoice(&secret).await
     };
 
@@ -298,7 +300,7 @@ async fn run_scenario() -> Result<()> {
     let alice_after = alice_core.get_balance_msat().await?;
     let bob_after = bob_knots.get_balance_msat().await?;
     info!("  alice on BTC:  {alice_before} -> {alice_after} msat");
-    info!("  bob on BTK:    {bob_before} -> {bob_after} msat");
+    info!("  bob on XBT:    {bob_before} -> {bob_after} msat");
     info!(
         "  total wall-clock {:.0}s, of which {:.0}s was waiting for channels",
         wall_clock.elapsed().as_secs_f32(),

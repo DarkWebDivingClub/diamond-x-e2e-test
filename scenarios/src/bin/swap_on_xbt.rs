@@ -1,4 +1,4 @@
-//! An atomic cross-chain swap with a BTK leg that is really BTK.
+//! An atomic cross-chain swap with a XBT leg that is really XBT.
 //!
 //! Mission 03.6. `lightning_swap` proved the swap across two chains, but
 //! its Knots chain ran at level 0 — `Blake2bHeight` at `INT_MAX`, 80-byte
@@ -6,12 +6,12 @@
 //! chain wearing different labels.
 //!
 //! Here the Knots chain has activated BLAKE2b before either channel is
-//! funded, so the BTK leg lives entirely under 164-byte v2 headers while
+//! funded, so the XBT leg lives entirely under 164-byte v2 headers while
 //! the BTC leg stays on v1. The two sides genuinely differ, and the
 //! scenario asserts that before asserting anything about the swap —
 //! otherwise it could pass by being `lightning_swap` again.
 //!
-//! Note which binary is which. The BTK nodes are built with the `blake2b`
+//! Note which binary is which. The XBT nodes are built with the `blake2b`
 //! feature; the BTC nodes are stock `dln-node`, which has never heard of a
 //! v2 header. One side of this swap does not know the other's chain
 //! changed, and does not need to.
@@ -75,10 +75,10 @@ async fn run_scenario() -> Result<()> {
     std::fs::create_dir_all(&output_dir)?;
     info!("Output directory: {}", output_dir.display());
 
-    // The BTK nodes must be able to read a v2 header. The BTC nodes must
+    // The XBT nodes must be able to read a v2 header. The BTC nodes must
     // not need to — they are left as stock dln-node, built by the harness.
     // Overridable so the negative control can be run: with
-    // KNOTS_FEATURES set to anything else, the BTK nodes cannot read
+    // KNOTS_FEATURES set to anything else, the XBT nodes cannot read
     // their own chain and this scenario must fail.
     if std::env::var("KNOTS_FEATURES").is_err() {
         std::env::set_var("KNOTS_FEATURES", "blake2b");
@@ -106,10 +106,10 @@ async fn run_scenario() -> Result<()> {
     assert_header(&knots, ACTIVATION_HEIGHT - 1, 1).await?;
     assert_header(&knots, ACTIVATION_HEIGHT, 2).await?;
     assert_header(&knots, KNOTS_PREMINE, 2).await?;
-    info!("  BTC chain v1 at 110; BTK chain v1 at {}, v2 at {ACTIVATION_HEIGHT} and {KNOTS_PREMINE}",
+    info!("  BTC chain v1 at 110; XBT chain v1 at {}, v2 at {ACTIVATION_HEIGHT} and {KNOTS_PREMINE}",
           ACTIVATION_HEIGHT - 1);
 
-    info!("Step 3: Four nodes — BTK side reads v2 headers, BTC side is stock");
+    info!("Step 3: Four nodes — XBT side reads v2 headers, BTC side is stock");
     let (_relay_container, relay_url) = relay::start_relay().await;
 
     let alice_core = DlnNode::start_on(
@@ -150,27 +150,27 @@ async fn run_scenario() -> Result<()> {
     .await?;
     info!("  both channels ready");
 
-    // ── Step 4: the BTK channel is funded under v2 headers ──────────────
+    // ── Step 4: the XBT channel is funded under v2 headers ──────────────
     // A channel that opened before activation would be 03.4's case. This
     // one has to have started life on the BLAKE2b chain.
-    info!("Step 4: Checking the BTK channel's funding block");
+    info!("Step 4: Checking the XBT channel's funding block");
     let funding_txid = alice_knots
         .list_channels()
         .await?
         .into_iter()
         .find(|c| c["peer_pubkey"].as_str() == Some(bob_knots_id.as_str()))
-        .context("no BTK channel")?["funding_txid"]
+        .context("no XBT channel")?["funding_txid"]
         .as_str()
-        .context("BTK channel has no funding_txid")?
+        .context("XBT channel has no funding_txid")?
         .to_string();
     let funding_height = tx_block_height(&knots, &funding_txid).await?;
     anyhow::ensure!(
         funding_height >= ACTIVATION_HEIGHT,
-        "the BTK channel was funded in block {funding_height}, below activation at \
+        "the XBT channel was funded in block {funding_height}, below activation at \
          {ACTIVATION_HEIGHT} — this leg did not open on a BLAKE2b chain"
     );
     assert_header(&knots, funding_height, 2).await?;
-    info!("  BTK funding {funding_txid} confirmed in block {funding_height}, a v2 block");
+    info!("  XBT funding {funding_txid} confirmed in block {funding_height}, a v2 block");
 
     // ── Step 5: one hash, two invoices ──────────────────────────────────
     info!("Step 5: bob generates the secret; both legs use its hash");
