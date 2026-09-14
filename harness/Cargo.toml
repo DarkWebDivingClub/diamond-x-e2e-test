@@ -7,6 +7,7 @@ description = "Shared infrastructure for driving dln-node end-to-end scenarios."
 publish = ["h3"]   # consumed by three suites; internal registry when it exists
 
 [dependencies]
+nostr-ln = { git = "https://github.com/DarkWebDivingClub/nostr-ln.git", branch = "master" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "signal", "time", "io-util"] }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }

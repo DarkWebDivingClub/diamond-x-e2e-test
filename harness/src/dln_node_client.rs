@@ -42,6 +42,13 @@ struct LdkNodeConfig {
 struct LdkNostrConfig {
     relay: String,
     private_key: String,
+    /// Whose grants the node accepts.
+    ///
+    /// **Required since mission 25.3.** An empty list accepts none, so a
+    /// harness that omits it starts a node that correctly refuses
+    /// everything. The node used to keep an owners list nothing ever wrote
+    /// to and apply every grant it saw — dln-node#1.
+    owners: Vec<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -172,13 +179,13 @@ impl DlnNode {
         // NCC grant: control methods for the controller key
         let ncc_grant = json!({
             "control": {
-                "open_channel": { "access_rate": null },
-                "list_channels": { "access_rate": null },
-                "close_channel": { "access_rate": null },
+                "open_channel": {},
+                "list_channels": {},
+                "close_channel": {},
             }
         });
         let d_ncc = format!("{service_pubkey}:{controller_pubkey}");
-        let ncc_event = EventBuilder::new(Kind::Custom(30078), ncc_grant.to_string())
+        let ncc_event = EventBuilder::new(Kind::Custom(nostr_ln::GRANT_KIND), ncc_grant.to_string())
             .tag(Tag::parse(["d", &d_ncc]).expect("d tag"))
             .tag(Tag::public_key(service_pubkey));
         grant_client.send_event_builder(ncc_event).await?;
@@ -186,20 +193,20 @@ impl DlnNode {
         // NWC grant: wallet methods for the NWC client key
         let nwc_grant = json!({
             "methods": {
-                "get_info": { "access_rate": null },
-                "pay_invoice": { "access_rate": null },
-                "get_balance": { "access_rate": null },
-                "make_invoice": { "access_rate": null },
-                "pay_onchain": { "access_rate": null },
-                "make_hold_invoice": { "access_rate": null },
-                "settle_hold_invoice": { "access_rate": null },
-                "cancel_hold_invoice": { "access_rate": null },
-                "lookup_invoice": { "access_rate": null },
-                "make_new_address": { "access_rate": null },
+                "get_info": {},
+                "pay_invoice": {},
+                "get_balance": {},
+                "make_invoice": {},
+                "pay_onchain": {},
+                "make_hold_invoice": {},
+                "settle_hold_invoice": {},
+                "cancel_hold_invoice": {},
+                "lookup_invoice": {},
+                "make_new_address": {},
             }
         });
         let d_nwc = format!("{service_pubkey}:{nwc_pubkey}");
-        let nwc_event = EventBuilder::new(Kind::Custom(30078), nwc_grant.to_string())
+        let nwc_event = EventBuilder::new(Kind::Custom(nostr_ln::GRANT_KIND), nwc_grant.to_string())
             .tag(Tag::parse(["d", &d_nwc]).expect("d tag"))
             .tag(Tag::public_key(service_pubkey));
         grant_client.send_event_builder(nwc_event).await?;
@@ -264,6 +271,9 @@ impl DlnNode {
             nostr: LdkNostrConfig {
                 relay: relay_url.to_string(),
                 private_key: service_keys.secret_key().to_secret_hex(),
+                // The key whose grants this node accepts — the same one
+                // that signed the two grants above.
+                owners: vec![owner_keys.public_key().to_hex()],
             },
             wallet: LdkWalletConfig {
                 max_channel_size_sats: 10_000_000,
