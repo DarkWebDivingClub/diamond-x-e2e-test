@@ -652,12 +652,16 @@ impl DlnNode {
 
     /// Send an on-chain payment. Returns the txid.
     pub async fn pay_onchain(&self, address: &str, amount_sats: u64) -> Result<String> {
+        // Raw JSON, because the fork's `PayOnchainRequest` spells the
+        // field `amount` and `nwc-onchain.md` spells it `amount_sats` —
+        // the `_sats` suffix rule again. Sending what the specification
+        // says, rather than what a type in a fork we do not implement
+        // says, is the point of this harness.
         let response = self
-            .send_nwc_request(Request::pay_onchain(PayOnchainRequest {
-                address: address.to_string(),
-                amount: amount_sats,
-                feerate: None,
-            }))
+            .send_nwc_raw(
+                "pay_onchain",
+                json!({ "address": address, "amount_sats": amount_sats }),
+            )
             .await
             .context("NWC pay_onchain failed")?;
         if let Some(err) = response.error {
@@ -816,6 +820,57 @@ impl DlnNode {
     /// Send an NWC request and read the response.
     async fn send_nwc_request(&self, request: Request) -> Result<Response> {
         self.send_nwc_request_timeout(request, None).await
+    }
+
+    /// Send a request built from **the specification's field names**.
+    ///
+    /// The fork's typed `Request` is convenient and is not authoritative:
+    /// where its spelling and ours differ — `amount` against
+    /// `amount_sats` — the specification wins, and this is how a test
+    /// says so.
+    async fn send_nwc_raw(&self, method: &str, params: Value) -> Result<Response> {
+        let payload = json!({ "method": method, "params": params });
+        let client_keys = Keys::new(self.nwc_uri.secret.clone());
+        let ciphertext = nip44::encrypt(
+            &self.nwc_uri.secret,
+            &self.service_pubkey,
+            payload.to_string(),
+            nip44::Version::V2,
+        )
+        .context("nip44 encrypt")?;
+        let event = EventBuilder::new(Kind::WalletConnectRequest, ciphertext)
+            .tag(Tag::public_key(self.service_pubkey))
+            .sign_with_keys(&client_keys)
+            .context("sign NWC request")?;
+
+        let sub = Filter::new()
+            .kind(Kind::Custom(23195))
+            .pubkey(client_keys.public_key())
+            .since(Timestamp::now());
+        self.nwc_client.subscribe(sub).await?;
+        self.nwc_client.send_event(&event).await?;
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            if tokio::time::Instant::now() >= deadline {
+                anyhow::bail!("no answer to {method} within 30s");
+            }
+            let found = self
+                .nwc_client
+                .fetch_events(
+                    Filter::new()
+                        .kind(Kind::Custom(23195))
+                        .pubkey(client_keys.public_key())
+                        .event(event.id),
+                )
+                .timeout(Duration::from_secs(2))
+                .await?;
+            if let Some(e) = found.first() {
+                let plain = nip44::decrypt(&self.nwc_uri.secret, &e.pubkey, &e.content)
+                    .context("nip44 decrypt")?;
+                return serde_json::from_str(&plain).context("decode NWC response");
+            }
+        }
     }
 
     async fn send_nwc_request_timeout(
