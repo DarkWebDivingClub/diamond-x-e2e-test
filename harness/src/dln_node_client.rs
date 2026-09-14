@@ -3,7 +3,6 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use nostr_sdk::prelude::*;
-use nwc::nostr::nips::nip04;
 use nwc::nostr::nips::nip44;
 use nwc::nostr::nips::nip47::{
     CancelHoldInvoiceRequest, LookupInvoiceRequest, MakeHoldInvoiceRequest, MakeInvoiceRequest,
@@ -765,7 +764,14 @@ impl DlnNode {
     /// the response (kind 23199).
     async fn send_ncc_request(&self, payload: Value) -> Result<Value> {
         let encrypted =
-            nip04::encrypt(&self.ncc_secret, &self.service_pubkey, payload.to_string())?;
+            // NIP-44. NIP-XX has never permitted NIP-04 — dln-node accepted
+            // it anyway, which is the other half of #3.
+            nip44::encrypt(
+                &self.ncc_secret,
+                &self.service_pubkey,
+                payload.to_string(),
+                nip44::Version::V2,
+            )?;
         let request_event = EventBuilder::new(Kind::Custom(CONTROL_REQUEST_KIND), encrypted)
             .tag(Tag::public_key(self.service_pubkey));
         self.ncc_client
@@ -775,7 +781,7 @@ impl DlnNode {
         let response_event =
             Self::read_ncc_response(&self.ncc_client, self.service_pubkey).await?;
         let decrypted =
-            nip04::decrypt(&self.ncc_secret, &self.service_pubkey, &response_event.content)?;
+            nip44::decrypt(&self.ncc_secret, &self.service_pubkey, &response_event.content)?;
         let response: Value = serde_json::from_str(&decrypted)?;
         Ok(response)
     }
