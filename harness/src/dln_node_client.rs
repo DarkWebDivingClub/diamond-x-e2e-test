@@ -482,7 +482,11 @@ impl DlnNode {
         let mut params = json!({
             "pubkey": node_id,
             "host": addr,
-            "amount": amount,
+            // `amount_sats`, not `amount`. NIP-XX renamed it when the
+            // `_sats` suffix rule landed — the field was always sats and
+            // the name did not say so. `nwc-units.md` now carries that
+            // rule; this fixture was still on the old name.
+            "amount_sats": amount,
         });
         if let Some(push) = push_amount {
             params["push_amount"] = json!(push);
