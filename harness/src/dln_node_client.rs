@@ -4,6 +4,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use nostr_sdk::prelude::*;
 use nwc::nostr::nips::nip04;
+use nwc::nostr::nips::nip44;
 use nwc::nostr::nips::nip47::{
     CancelHoldInvoiceRequest, LookupInvoiceRequest, MakeHoldInvoiceRequest, MakeInvoiceRequest,
     Method, NostrWalletConnectUri, PayInvoiceRequest, PayOnchainRequest, Request, RequestParams,
@@ -833,9 +834,24 @@ impl DlnNode {
         request: Request,
         timeout: Option<Duration>,
     ) -> Result<Response> {
-        let request_event = request
-            .to_event(uri)
-            .context("failed to create NWC request event")?;
+        // **NIP-44, not `to_event`.** The fork's `Request::to_event`
+        // encrypts with NIP-04, and `dln-node` used to accept it — which is
+        // [dln-node#3](https://github.com/DarkWebDivingClub/dln-node/issues/3).
+        // This harness has been depending on that defect, in the same way
+        // it was writing `access_rate`: a fixture agreeing with the bug is
+        // why nothing caught it.
+        let client_keys = Keys::new(uri.secret.clone());
+        let ciphertext = nip44::encrypt(
+            &uri.secret,
+            &service_pubkey,
+            request.as_json(),
+            nip44::Version::V2,
+        )
+        .context("nip44 encrypt")?;
+        let request_event = EventBuilder::new(Kind::WalletConnectRequest, ciphertext)
+            .tag(Tag::public_key(service_pubkey))
+            .sign_with_keys(&client_keys)
+            .context("sign NWC request")?;
         client.send_event(&request_event).await?;
 
         let timeout = timeout.unwrap_or(Duration::from_secs(10));
@@ -848,8 +864,14 @@ impl DlnNode {
                     if event.kind == Kind::WalletConnectResponse
                         && event.pubkey == service_pubkey
                     {
-                        let resp = Response::from_event(&uri_clone, event)
-                            .context("failed to decrypt NWC response")?;
+                        let plaintext = nip44::decrypt(
+                            &uri_clone.secret,
+                            &event.pubkey,
+                            &event.content,
+                        )
+                        .context("nip44 decrypt")?;
+                        let resp: Response = serde_json::from_str(&plaintext)
+                            .context("failed to decode NWC response")?;
                         return Ok(resp);
                     }
                 }
