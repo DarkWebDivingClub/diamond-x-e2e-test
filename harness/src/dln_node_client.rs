@@ -190,7 +190,19 @@ impl DlnNode {
             .tag(Tag::public_key(service_pubkey));
         grant_client.send_event_builder(ncc_event).await?;
 
-        // NWC grant: wallet methods for the NWC client key
+        // NWC grant: wallet methods for the NWC client key.
+        //
+        // Listed rather than wildcarded, so a scenario calling something
+        // nobody meant to authorise fails loudly. The cost is that a
+        // scenario reaching for a new method must add it here — which is
+        // how `quote_payment` came to be missing, and how the demo's
+        // maker found out.
+        //
+        // **`notifications` is a separate section and delivery needs
+        // both.** A grant that lists methods alone permits no
+        // notification at all, and the failure is silent: the wallet
+        // simply has no recipients, and whoever is waiting waits out its
+        // timeout.
         let nwc_grant = json!({
             "methods": {
                 "get_info": {},
@@ -203,6 +215,12 @@ impl DlnNode {
                 "cancel_hold_invoice": {},
                 "lookup_invoice": {},
                 "make_new_address": {},
+                "quote_payment": {},
+            },
+            "notifications": {
+                "payment_received": {},
+                "payment_sent": {},
+                "hold_invoice_accepted": {},
             }
         });
         let d_nwc = format!("{service_pubkey}:{nwc_pubkey}");
