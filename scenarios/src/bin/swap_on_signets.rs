@@ -1,6 +1,7 @@
-//! An atomic cross-chain swap on chains the test cannot mine on.
+//! An atomic cross-chain swap, negotiated and settled by two processes
+//! that share nothing but a relay.
 //!
-//! Mission 10.3. `swap_on_xbt` proves this swap, but against chains the
+//! Missions 10.3 and 27. `swap_on_xbt` proves the swap against chains the
 //! harness starts, premines and mines on demand. Here both legs run on the
 //! live signets — `btc.signet.dwdc` and `xbt.signet.dwdc` — which the
 //! harness cannot mine on. It ran against the public chains until
@@ -23,6 +24,24 @@
 //! header assertion stays, because a swap that passed with both legs on
 //! v1 chains would prove nothing about XBT.
 //!
+//! ## This scenario does not perform the trade
+//!
+//! Mission 27. Until then this file held clients for all four nodes and
+//! arranged both legs itself, which is fine for a test and **wrong for a
+//! demo**: it showed a trade that could not happen between strangers,
+//! because the thing arranging it could see both sides.
+//!
+//! Now it builds the stage and gets off it. It attaches to the chains,
+//! starts four nodes, opens two channels — and then starts `alice` and
+//! `bob`, two binaries from `dln-x-demo`, each handed the connection URIs
+//! for **its own two nodes only** and the relay. They negotiate over
+//! NIP-XZ and settle over NWC, and this process learns nothing about what
+//! passed between them except from the nodes afterwards.
+//!
+//! **What it asserts on is chains and nodes.** A party that exited zero
+//! while having done nothing must still fail the balance check, so a
+//! party's own report of success is necessary and never sufficient.
+//!
 //! Happy path only, as in `swap_on_xbt`. Mission 04 is where abandonment
 //! and CLTV ordering get tested.
 //!
@@ -32,15 +51,14 @@
 //! cargo run --bin swap_on_signets
 //! ```
 //!
-//! It needs both treasuries funded and both signets reachable. See
-//! `doc/signet-treasury.md`.
+//! It needs both treasuries funded, both signets reachable, and a checkout
+//! of `dln-x-demo` (`DLN_X_DEMO_DIR`). See `doc/signet-treasury.md`.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use nostr_sdk::prelude::*;
-use sha2::{Digest, Sha256};
 use tracing::info;
 
 use dln_e2e_harness::bitcoind::{AttachConfig, BitcoindHarness};
@@ -216,98 +234,151 @@ async fn run_scenario() -> Result<()> {
     assert_header(&knots, funding_height, 2).await?;
     info!("Step 5: XBT funding {funding_txid} confirmed in block {funding_height}, a v2 block");
 
-    // ── Step 6: one hash, two invoices ──────────────────────────────────
-    info!("Step 6: bob generates the secret; both legs use its hash");
-    let secret_bytes = Keys::generate().secret_key().to_secret_bytes();
-    let secret = hex::encode(secret_bytes);
-    let payment_hash = hex::encode(Sha256::digest(secret_bytes));
+    // ── Step 6: hand each party its own two nodes, and nothing else ────
+    //
+    // This is where the scenario stops being a participant. Everything
+    // above is stagecraft — chains, nodes, channels — and everything
+    // below is two strangers with a relay between them.
+    info!("Step 6: starting alice and bob as separate processes");
+    let party_bin = util::build_party_binaries()?;
 
+    // Balances read *before* either party runs, from the nodes rather
+    // than from anything a party will later claim.
     let alice_before = alice_core.get_balance_msat().await?;
     let bob_before = bob_knots.get_balance_msat().await?;
 
-    let alice_invoice = alice_core
-        .make_hold_invoice(CORE_LEG_MSAT, &payment_hash, "swap: alice receives btc")
-        .await
-        .context("alice-core make_hold_invoice failed")?;
-    let bob_invoice = bob_knots
-        .make_hold_invoice(KNOTS_LEG_MSAT, &payment_hash, "swap: bob receives xbt")
-        .await
-        .context("bob-knots make_hold_invoice failed")?;
+    // Trade-plane identities. Each party gets its own secret and neither
+    // gets the other's — they find each other by the offer, which is how
+    // a taker finds a maker with no introduction.
+    let alice_keys = Keys::generate();
+    let bob_keys = Keys::generate();
 
-    anyhow::ensure!(alice_invoice != bob_invoice, "both legs produced the same invoice");
-    for (who, inv) in [("alice", &alice_invoice), ("bob", &bob_invoice)] {
-        anyhow::ensure!(
-            invoice_payment_hash(inv)? == payment_hash,
-            "{who}'s invoice does not carry the agreed payment hash"
-        );
-    }
-    info!("  both invoices carry {payment_hash}");
+    // Bob quotes a price. Alice does not know it until she reads the
+    // offer, and this scenario does not tell her: `PRICE_PPM` goes to Bob
+    // alone, and `expected_xbt` below is what the orchestrator derives so
+    // it can check the outcome — not something Alice is given.
+    let price_ppm: u64 = (KNOTS_LEG_MSAT as u128 * 1_000_000 / CORE_LEG_MSAT as u128) as u64;
+    let expected_xbt = CORE_LEG_MSAT as u128 * price_ppm as u128;
+    let expected_xbt = ((expected_xbt + 999_999) / 1_000_000) as u64;
 
-    // ── Steps 7-9: fund both legs, then settle in order ─────────────────
-    // Lightning settles off-chain, so this part costs no blocks and runs at
-    // the same speed it does on regtest. Only the setup was slow.
-    info!("Step 7: funding both legs");
-    let started = Instant::now();
+    let mut bob = std::process::Command::new(party_bin.join("bob"));
+    bob.env("BOB_BTC_URI", bob_core.nwc_uri())
+        .env("BOB_XBT_URI", bob_knots.nwc_uri())
+        .env("BOB_RELAY", &relay_url)
+        .env("BOB_NOSTR_SECRET", bob_keys.secret_key().to_secret_hex())
+        .env("BOB_PRICE_PPM", price_ppm.to_string())
+        .stdout(log_file(&output_dir, "bob.log")?)
+        .stderr(log_file(&output_dir, "bob.err")?);
 
-    let bob_pays_core = bob_core.pay_invoice(&alice_invoice);
+    let mut alice = std::process::Command::new(party_bin.join("alice"));
+    alice
+        .env("ALICE_BTC_URI", alice_core.nwc_uri())
+        .env("ALICE_XBT_URI", alice_knots.nwc_uri())
+        .env("ALICE_RELAY", &relay_url)
+        .env("ALICE_NOSTR_SECRET", alice_keys.secret_key().to_secret_hex())
+        .env("ALICE_AMOUNT_MSAT", CORE_LEG_MSAT.to_string())
+        .stdout(log_file(&output_dir, "alice.log")?)
+        .stderr(log_file(&output_dir, "alice.err")?);
 
-    let alice_flow = async {
-        let observed = alice_knots
-            .pay_invoice(&bob_invoice)
-            .await
-            .context("alice-knots pay_invoice failed")?;
-        anyhow::ensure!(observed == secret, "alice observed {observed}, expected {secret}");
-        info!(
-            "Step 9: alice observed the preimage from her own payment after {:.1}s",
-            started.elapsed().as_secs_f32()
-        );
-        alice_core
-            .settle_hold_invoice(&observed)
-            .await
-            .context("alice-core settle_hold_invoice failed")?;
-        Ok::<String, anyhow::Error>(observed)
-    };
+    // Nothing above hands either command a node of the other's, a path
+    // into this process, or a file the other writes. The isolation is a
+    // property of this block and can be read off it.
 
-    let bob_settles = async {
-        wait_for(Duration::from_secs(180), "both legs held", || async {
-            Ok(alice_core.lookup_invoice(&payment_hash).await.is_ok()
-                && bob_knots.lookup_invoice(&payment_hash).await.is_ok())
-        })
-        .await?;
-        tokio::time::sleep(Duration::from_secs(3)).await;
-        info!("Step 8: bob settles the XBT leg, revealing the secret");
-        bob_knots.settle_hold_invoice(&secret).await
-    };
+    // ── Step 7: let them trade ─────────────────────────────────────────
+    //
+    // Bob first, because a taker cannot find an offer that has not been
+    // published. That is the only ordering between them, and it is
+    // startup ordering rather than protocol: Alice waits sixty seconds
+    // for an offer, so a slow Bob costs time and not a failure.
+    info!("Step 7: bob publishes, alice takes — this process now only waits");
+    let traded = Instant::now();
+    let mut bob = bob.spawn().context("failed to start bob")?;
+    let mut alice = alice.spawn().context("failed to start alice")?;
 
-    let (core_payment, alice_result, settled) =
-        tokio::join!(bob_pays_core, alice_flow, bob_settles);
-    settled.context("bob-knots settle_hold_invoice failed")?;
-    let observed = alice_result?;
-    let core_preimage = core_payment.context("bob-core pay_invoice failed")?;
-    anyhow::ensure!(
-        core_preimage == observed,
-        "the BTC leg settled with a different preimage"
+    let alice_status = wait_for_exit(&mut alice, "alice", Duration::from_secs(600)).await;
+    let bob_status = wait_for_exit(&mut bob, "bob", Duration::from_secs(600)).await;
+
+    // Reported before either is checked, so a run where both failed says
+    // so about both.
+    info!(
+        "  alice {:?}, bob {:?}, after {:.1}s — logs in {}",
+        alice_status.as_ref().map(|s| s.to_string()),
+        bob_status.as_ref().map(|s| s.to_string()),
+        traded.elapsed().as_secs_f32(),
+        output_dir.display()
     );
+    let alice_status = alice_status?;
+    let bob_status = bob_status?;
+    anyhow::ensure!(alice_status.success(), "alice exited {alice_status}");
+    anyhow::ensure!(bob_status.success(), "bob exited {bob_status}");
 
-    // ── Step 10: both parties ended up with what they wanted ────────────
-    info!("Step 10: verifying balances on both chains");
+    // ── Step 8: the nodes agree that it happened ───────────────────────
+    //
+    // Both parties claim success. That is not the evidence — this is.
+    info!("Step 8: verifying balances on both chains");
     wait_for(Duration::from_secs(120), "balances to settle", || async {
         Ok(alice_core.get_balance_msat().await? >= alice_before + CORE_LEG_MSAT
-            && bob_knots.get_balance_msat().await? >= bob_before + KNOTS_LEG_MSAT)
+            && bob_knots.get_balance_msat().await? >= bob_before + expected_xbt)
     })
-    .await?;
+    .await
+    .context(
+        "both parties exited zero and the balances did not move — \
+         a party reporting success is not a trade",
+    )?;
 
     let alice_after = alice_core.get_balance_msat().await?;
     let bob_after = bob_knots.get_balance_msat().await?;
     info!("  alice on BTC:  {alice_before} -> {alice_after} msat");
-    info!("  bob on XBT:    {bob_before} -> {bob_after} msat");
+    info!("  bob on XBT:    {bob_before} -> {bob_after} msat (quoted at {price_ppm} ppm)");
+
+    // Atomicity, stated as the thing that would have been observed had it
+    // failed: one leg moving without the other.
+    anyhow::ensure!(
+        alice_after > alice_before && bob_after > bob_before,
+        "one leg moved and the other did not — the swap was not atomic"
+    );
+
     info!(
-        "  total wall-clock {:.0}s, of which {:.0}s was waiting for channels",
+        "  total wall-clock {:.0}s, of which {:.0}s was waiting for channels \
+         and {:.0}s was the trade",
         wall_clock.elapsed().as_secs_f32(),
-        opened.elapsed().as_secs_f32()
+        opened.elapsed().as_secs_f32(),
+        traded.elapsed().as_secs_f32()
     );
 
     Ok(())
+}
+
+/// A file for a child's output, kept beside the node logs.
+///
+/// A party's stdout is **evidence of what it did**, not input to the
+/// assertions. Nothing here reads these back.
+fn log_file(dir: &std::path::Path, name: &str) -> Result<std::fs::File> {
+    std::fs::File::create(dir.join(name))
+        .with_context(|| format!("could not create {name}"))
+}
+
+/// Wait for a child, killing it if it outstays the deadline.
+///
+/// A party that hangs must surface as a named failure rather than as a
+/// scenario that never returns.
+async fn wait_for_exit(
+    child: &mut std::process::Child,
+    who: &str,
+    timeout: Duration,
+) -> Result<std::process::ExitStatus> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            anyhow::bail!("{who} did not finish within {}s", timeout.as_secs());
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
 }
 
 async fn height(bitcoind: &BitcoindHarness) -> Result<u64> {
@@ -377,16 +448,6 @@ async fn tx_block_height(bitcoind: &BitcoindHarness, txid: &str) -> Result<u64> 
         .map_err(|e| anyhow::anyhow!("getblockheader failed: {e}"))?;
     header["height"].as_u64().context("no height in the header")
 }
-
-/// Extract the payment hash from a BOLT11 invoice's tagged fields.
-fn invoice_payment_hash(invoice: &str) -> Result<String> {
-    use lightning_invoice::Bolt11Invoice;
-    use std::str::FromStr;
-    let parsed = Bolt11Invoice::from_str(invoice)
-        .map_err(|e| anyhow::anyhow!("invoice did not parse: {e:?}"))?;
-    Ok(parsed.payment_hash().to_string())
-}
-
 
 async fn wait_for<F, Fut>(timeout: Duration, what: &str, mut check: F) -> Result<()>
 where

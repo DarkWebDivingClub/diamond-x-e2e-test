@@ -76,3 +76,35 @@ pub fn build_knots_node() -> anyhow::Result<String> {
 
 /// Default checkout of the Knots build of the node.
 pub const KNOTS_NODE_DIR: &str = "/home/rene/git/dln-node-knots";
+
+/// Default checkout of the demo, which is where the party binaries live.
+pub const DLN_X_DEMO_DIR: &str = "/home/rene/git/dln-x-demo";
+
+/// Build `alice` and `bob` and return the directory holding them.
+///
+/// They are built rather than linked **on purpose**. A scenario that
+/// called into a party would be a scenario that shared memory with it,
+/// and the whole claim of the demo is that the two parties share nothing
+/// but a relay.
+pub fn build_party_binaries() -> anyhow::Result<std::path::PathBuf> {
+    use anyhow::Context;
+
+    let dir = std::path::PathBuf::from(
+        std::env::var("DLN_X_DEMO_DIR").unwrap_or_else(|_| DLN_X_DEMO_DIR.to_string()),
+    );
+    anyhow::ensure!(dir.is_dir(), "{} not found", dir.display());
+
+    tracing::info!("building the party binaries in {}", dir.display());
+    let status = std::process::Command::new("cargo")
+        .args(["build", "--bin", "alice", "--bin", "bob"])
+        .current_dir(&dir)
+        .status()
+        .context("failed to run cargo build for the party binaries")?;
+    anyhow::ensure!(status.success(), "cargo build failed with {status}");
+
+    let out = dir.join("target/debug");
+    for who in ["alice", "bob"] {
+        anyhow::ensure!(out.join(who).exists(), "{who} not found in {}", out.display());
+    }
+    Ok(out)
+}

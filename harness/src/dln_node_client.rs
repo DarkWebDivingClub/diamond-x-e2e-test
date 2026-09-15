@@ -6,7 +6,7 @@ use nostr_sdk::prelude::*;
 use nwc::nostr::nips::nip44;
 use nwc::nostr::nips::nip47::{
     CancelHoldInvoiceRequest, LookupInvoiceRequest, MakeHoldInvoiceRequest, MakeInvoiceRequest,
-    Method, NostrWalletConnectUri, PayInvoiceRequest, PayOnchainRequest, Request, RequestParams,
+    Method, NostrWalletConnectUri, PayInvoiceRequest, Request, RequestParams,
     Response, ResponseResult, SettleHoldInvoiceRequest,
 };
 use serde_json::{json, Value};
@@ -465,6 +465,17 @@ impl DlnNode {
     }
 
     // ── Public API (all via Nostr) ─────────────────────────────────────
+
+    /// This node's NWC connection URI.
+    ///
+    /// Handing it to a separate process is how a party is given control
+    /// of a node it owns — and, because a party is given only its own
+    /// two, how it is denied the others. There is no other way in: the
+    /// party binaries take nodes from the environment and from nowhere
+    /// else.
+    pub fn nwc_uri(&self) -> String {
+        self.nwc_uri.to_string()
+    }
 
     pub fn node_id(&self) -> String {
         self.node_id.clone()
