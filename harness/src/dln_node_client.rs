@@ -184,6 +184,16 @@ impl DlnNode {
                 "close_channel": {},
             }
         });
+        // The same escape hatch as the wallet grant below. Three of the
+        // fourteen control methods are granted here, so eleven are
+        // unreachable in any scenario — fine for tests that declare what
+        // they use, useless for a person holding `dln-ctrl`.
+        let ncc_grant = if std::env::var("DLN_E2E_FULL_GRANT").is_ok() {
+            json!({ "control": { "OTHERS": {} }, "notifications": { "OTHERS": {} } })
+        } else {
+            ncc_grant
+        };
+
         let d_ncc = format!("{service_pubkey}:{controller_pubkey}");
         let ncc_event = EventBuilder::new(Kind::Custom(nostr_ln::GRANT_KIND), ncc_grant.to_string())
             .tag(Tag::parse(["d", &d_ncc]).expect("d tag"))
@@ -223,6 +233,21 @@ impl DlnNode {
                 "hold_invoice_accepted": {},
             }
         });
+        // **An escape hatch for driving a node by hand.** The list above
+        // is deliberately narrow so a scenario calling something nobody
+        // authorised fails loudly — but it also means 13 of the 24 wallet
+        // methods are unreachable in any test, and a person holding
+        // `dln-ctrl` wants all of them.
+        //
+        // Off unless asked for, so no scenario silently gains a wider
+        // grant than it declared.
+        let nwc_grant = if std::env::var("DLN_E2E_FULL_GRANT").is_ok() {
+            tracing::warn!("DLN_E2E_FULL_GRANT: granting every method and notification");
+            json!({ "methods": { "OTHERS": {} }, "notifications": { "OTHERS": {} } })
+        } else {
+            nwc_grant
+        };
+
         let d_nwc = format!("{service_pubkey}:{nwc_pubkey}");
         let nwc_event = EventBuilder::new(Kind::Custom(nostr_ln::GRANT_KIND), nwc_grant.to_string())
             .tag(Tag::parse(["d", &d_nwc]).expect("d tag"))
@@ -493,6 +518,29 @@ impl DlnNode {
     /// else.
     pub fn nwc_uri(&self) -> String {
         self.nwc_uri.to_string()
+    }
+
+    /// This node's NNC connection URI, and the key to sign with.
+    ///
+    /// **Two values where NWC needs one.** A `nostr+nodecontrol://` URI
+    /// carries no secret — it says who and where, and the signer says who
+    /// you are — so a process given control of a node over NNC needs
+    /// both. That asymmetry is the protocols', not this harness's.
+    pub fn nnc_uri(&self) -> (String, String) {
+        let relay = self
+            .nwc_uri
+            .relays
+            .first()
+            .map(|r| r.to_string())
+            .unwrap_or_default();
+        (
+            format!(
+                "nostr+nodecontrol://{}?relay={}",
+                self.service_pubkey.to_hex(),
+                urlencoding_minimal(&relay)
+            ),
+            self.ncc_secret.to_secret_hex(),
+        )
     }
 
     pub fn node_id(&self) -> String {
@@ -1035,4 +1083,11 @@ fn dln_node_binary() -> Result<String> {
         binary.display()
     );
     Ok(binary.to_string_lossy().to_string())
+}
+
+/// Percent-encode the handful of characters a relay URL puts in a query
+/// value. Not a general encoder — a `ws://host:port` URL contains only
+/// these, and pulling a crate in for three replacements would be worse.
+fn urlencoding_minimal(s: &str) -> String {
+    s.replace('%', "%25").replace(':', "%3A").replace('/', "%2F")
 }
