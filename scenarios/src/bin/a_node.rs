@@ -53,19 +53,36 @@ async fn main() -> Result<()> {
         std::env::set_var("DLN_E2E_FULL_GRANT", "1");
     }
 
-    eprintln!("starting bitcoind, a relay and two nodes — about a minute");
-    let chain = BitcoindHarness::start().await;
+    // **Either build of the node, on its own chain.** `dln-ctrl` claims
+    // to be a protocol client rather than a node-specific one, and the
+    // only way to mean it is to point it at the other build. The XBT side
+    // reads v2 (BLAKE2b) headers; the node source is byte-identical.
+    let knots = std::env::var("A_NODE_KNOTS").is_ok();
+    let binary = if knots {
+        if std::env::var("KNOTS_FEATURES").is_err() {
+            std::env::set_var("KNOTS_FEATURES", "blake2b");
+        }
+        Some(util::build_knots_node()?)
+    } else {
+        None
+    };
+
+    eprintln!(
+        "starting bitcoind, a relay and two {} nodes — about a minute",
+        if knots { "knots" } else { "core" }
+    );
+    let chain = if knots { BitcoindHarness::start_knots().await } else { BitcoindHarness::start().await };
     let miner = chain.get_new_address().await;
     chain.mine_blocks(BLOCKS, &miner).await;
 
     let (_relay, relay_url) = relay::start_relay().await;
 
     let alice = DlnNode::start_on(
-        "alice", SignerMode::Plain, None, &chain, &miner, &relay_url, &output_dir,
+        "alice", SignerMode::Plain, binary.as_deref(), &chain, &miner, &relay_url, &output_dir,
     )
     .await?;
     let bob = DlnNode::start_on(
-        "bob", SignerMode::Plain, None, &chain, &miner, &relay_url, &output_dir,
+        "bob", SignerMode::Plain, binary.as_deref(), &chain, &miner, &relay_url, &output_dir,
     )
     .await?;
 
@@ -88,7 +105,10 @@ async fn main() -> Result<()> {
     let ready = alice.has_ready_channel_with(&bob_id).await;
 
     println!("\n───────────────────────────────────────────────────────────");
-    println!("  two nodes on regtest. channel ready: {ready}");
+    println!(
+        "  two {} nodes on regtest. channel ready: {ready}",
+        if knots { "knots (v2 headers)" } else { "core" }
+    );
     println!("───────────────────────────────────────────────────────────\n");
     println!("# alice — has outbound, can pay");
     println!("export NWC_URI='{}'", alice.nwc_uri());
